@@ -19,6 +19,8 @@ export interface SteamAchievementDetail {
 }
 
 export interface AchievementDetails {
+  // 商店页 header 图（带游戏标题艺术），来自 appdetails API；无商店页时为空
+  headerImageUrl: string;
   achievements: SteamAchievementDetail[];
   updatedAt: string;
 }
@@ -35,8 +37,9 @@ export interface PerfectGamesIndex {
   lastUpdated: string;
 }
 
-const ACHIEVEMENT_DETAILS_PREFIX = "steam:achievements:";
-const PERFECT_INDEX_KEY = "steam:perfect_games_index";
+// v3: 图标改用商店页 header_image（带游戏标题），每游戏带 hash 路径
+const ACHIEVEMENT_DETAILS_PREFIX = "steam:achievements:v3:";
+const PERFECT_INDEX_KEY = "steam:perfect_games_index:v3";
 
 /**
  * Get achievement details for a specific game

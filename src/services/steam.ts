@@ -12,21 +12,32 @@ import {
 
 const API_BASE = "https://api.steampowered.com";
 
-// Steam 商店头图 CDN，460x215，卡片和展开详情共用
+// Steam 客户端游戏库横幅图，3840x1240，所有游戏都存在
+// 注意：不能用 header.jpg（460x215 商店图），部分新游戏/小游戏没有该资源会 404
+// （如 Servant of the Lake / appid 3636770），商店页实际用的是带 hash 的路径
 const APP_IMAGE_BASE = "https://cdn.cloudflare.steamstatic.com/steam/apps";
-// 成就图标 CDN，hash 来自 GetSchemaForGame
+// 成就图标统一用社区 assets 路径（新旧游戏均有效）
+// 注意：schema 返回的 icon 可能是纯 hash，也可能是带旧版路径的完整 URL
+// （旧路径 steamcommunity/public/images/apps 对部分新游戏是死链，
+// 如 Servant of the Lake，社区页面实际用的是 community_assets 路径）
 const ACHIEVEMENT_IMAGE_BASE =
-  "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps";
+  "https://shared.akamai.steamstatic.com/community_assets/images/apps";
 
 const RATE_LIMIT_MS = 300;
 
 /**
- * GetSchemaForGame 的 icon 字段可能是纯 hash，也可能是完整 URL（不同游戏表现不一），统一处理
+ * GetSchemaForGame 的 icon 字段可能是纯 hash，也可能是完整 URL，统一提取 hash
+ * 走 community_assets 通用路径（旧版 steamcommunity 路径对部分新游戏是死链）
  */
 function normalizeAchievementIconUrl(appId: number, icon: string): string {
-  return icon.startsWith("http")
-    ? icon
-    : `${ACHIEVEMENT_IMAGE_BASE}/${appId}/${icon}.jpg`;
+  const hash = icon
+    .split("/")
+    .pop()
+    ?.replace(/\.(jpg|png)$/, "");
+  if (!hash) {
+    return "";
+  }
+  return `${ACHIEVEMENT_IMAGE_BASE}/${appId}/${hash}.jpg`;
 }
 
 interface SteamPlayerSummary {
@@ -85,6 +96,33 @@ async function steamApi<T>(
   }
 
   return (await response.json()) as T;
+}
+
+/**
+ * 从商店 API 获取 header_image（带游戏标题艺术）。
+ * 无商店页（下架/锁区）时返回空串，调用方回退到 hero 图。
+ */
+async function fetchStoreHeaderImage(appId: number): Promise<string> {
+  try {
+    const response = await fetch(
+      `https://store.steampowered.com/api/appdetails?appids=${appId}&filters=basic`,
+    );
+    if (!response.ok) {
+      return "";
+    }
+    const data = (await response.json()) as Record<
+      string,
+      { success: boolean; data?: { header_image?: string } }
+    >;
+    const entry = data[String(appId)];
+    if (!entry?.success) {
+      return "";
+    }
+    return entry.data?.header_image ?? "";
+  } catch (error) {
+    console.error(`appdetails failed for ${appId}:`, error);
+    return "";
+  }
 }
 
 /**
@@ -152,7 +190,7 @@ async function updateNewPerfectGameDetails(
     try {
       console.log(`正在获取 ${game.name} 的成就详情...`);
 
-      const [schema, percentages] = await Promise.all([
+      const [schema, percentages, headerImageUrl] = await Promise.all([
         steamApi<{
           game: {
             availableGameStats?: { achievements?: SteamSchemaAchievement[] };
@@ -170,6 +208,7 @@ async function updateNewPerfectGameDetails(
             gameid: String(game.appid),
           },
         ),
+        fetchStoreHeaderImage(game.appid),
       ]);
 
       const schemaAchievements =
@@ -209,6 +248,7 @@ async function updateNewPerfectGameDetails(
       );
 
       const details: AchievementDetails = {
+        headerImageUrl,
         achievements,
         updatedAt: new Date().toISOString(),
       };
@@ -306,7 +346,9 @@ export async function fetchSteamProfile(
       return {
         appId: game.appid,
         name: game.name,
-        iconUrl: `${APP_IMAGE_BASE}/${game.appid}/header.jpg`,
+        iconUrl:
+          details?.headerImageUrl ||
+          `${APP_IMAGE_BASE}/${game.appid}/library_hero.jpg`,
         playtimeMinutes: game.playtime_forever,
         lastPlayed: game.rtime_last_played
           ? new Date(game.rtime_last_played * 1000).toISOString()

@@ -25,12 +25,10 @@
     "ALLOWED_DOMAINS": "rorytech.com",
     "STEAM_ID64": "76561198215402772"
   },
-  // 部署前把 id 替换为 `pnpm wrangler kv namespace create STEAM_CACHE` 返回的真实 id
-  // 本地 dev 时 Miniflare 会模拟该命名空间，占位 id 不会真的被访问
   "kv_namespaces": [
     {
       "binding": "STEAM_CACHE",
-      "id": "00000000000000000000000000000000"
+      "id": "b787838b6c614d4fb9fb8147d40acbf5"
     }
   ],
   "triggers": {
