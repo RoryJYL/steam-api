@@ -21,7 +21,6 @@
     "enabled": true
   },
   "vars": {
-    "CACHE_TTL_SECONDS": "43200",
     "ALLOWED_DOMAINS": "rorytech.com",
     "STEAM_ID64": "76561198215402772"
   },

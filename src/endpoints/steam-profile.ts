@@ -39,17 +39,12 @@ export class SteamProfileGet extends OpenAPIRoute {
     }
 
     const forceRefresh = c.req.query("refresh") === "true";
-    const cacheTtl = Number(c.env.CACHE_TTL_SECONDS) || 43200;
     const cached = await getCachedProfile(c.env.STEAM_CACHE);
 
+    // 请求路径是纯读：有缓存就返回缓存，不管新旧。
+    // 刷新职责归 cron（每 6 小时）和 ?refresh=true 手动触发；
     if (!forceRefresh && cached) {
-      const now = Date.now();
-      const age = (now - cached.timestamp) / 1000;
-      const isFresh = age <= cacheTtl;
-
-      if (isFresh) {
-        return c.json(cached.data);
-      }
+      return c.json(cached.data);
     }
 
     try {

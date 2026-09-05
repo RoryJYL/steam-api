@@ -17,7 +17,7 @@ GetPlayerSummaries + GetOwnedGames (2 requests, parallel)
   → GetPlayerAchievements per game (rate limited, 300ms)
   → perfect game: earned == total > 0
   → incremental detail fetch (only new perfect games or earned count changed):
-      GetSchemaForGame + GetGlobalAchievementPercentagesForApp
+      GetSchemaForGame + GetGlobalAchievementPercentagesForApp + appdetails
   → merge + write KV
 ```
 
@@ -28,6 +28,13 @@ GetPlayerSummaries + GetOwnedGames (2 requests, parallel)
 - `steam:perfect_games_index` — perfect game index with earned snapshot
 
 Cron pre-warms every 6 hours.
+
+Refresh strategy:
+
+- cron every 6 hours runs the full crawl and refreshes the cache
+- HTTP requests are pure reads: cached data is returned as-is (fresh or not), a ~75s crawl never runs in the request path
+- `?refresh=true` forces a manual crawl (also happens automatically on first request when the cache is cold)
+- on crawl failure requests fall back to the stale cache
 
 ## Setup
 
