@@ -29,6 +29,11 @@ const ACHIEVEMENT_IMAGE_BASE =
 
 const RATE_LIMIT_MS = 300;
 
+// 免费计划 Worker 每次调用最多 50 个子请求，装不下全部候选游戏。
+// 成就只会在游玩时变化，所以每轮只抓最近玩过的前 N 个游戏，
+// 其余沿用 KV 里的进度快照。预算：2(概况+游戏库) + N(首轮) + 失败重试 + 详情 ≈ 50
+const REFRESH_BATCH_SIZE = 30;
+
 /**
  * GetSchemaForGame 的 icon 字段可能是纯 hash，也可能是完整 URL，统一提取 hash
  * 走 community_assets 通用路径（旧版 steamcommunity 路径对部分新游戏是死链）
@@ -350,32 +355,24 @@ export async function fetchSteamProfile(
     (g) => g.has_community_visible_stats && g.playtime_forever > 0,
   );
 
-  const { progressMap, failures } = await fetchAchievementProgress(
+  // 只抓最近玩过的一批游戏，其余沿用旧快照
+  const freshWindow = [...candidates]
+    .sort((a, b) => b.rtime_last_played - a.rtime_last_played)
+    .slice(0, REFRESH_BATCH_SIZE);
+
+  const { progressMap } = await fetchAchievementProgress(
     apiKey,
     steamId,
-    candidates,
+    freshWindow,
   );
 
-  // 本次抓取失败的候选保留上次成功的进度快照，
-  // 保证一次刷新永远不会让缓存比之前更差
+  // 以旧快照为底：不在刷新窗口内的游戏保留上次数据，
+  // 窗口内抓取失败的也保留旧数据——刷新永远不会让缓存比之前更差
   const merged = new Map<
     number,
     { earned: number; total: number; progress: SteamAchievementProgress[] }
   >();
   for (const game of candidates) {
-    const fresh = progressMap.get(game.appid);
-    if (fresh) {
-      merged.set(game.appid, {
-        earned: fresh.filter((p) => p.achieved === 1).length,
-        total: fresh.length,
-        progress: fresh,
-      });
-      continue;
-    }
-    // 没抓到且没失败 = 该游戏正常无成就，不进 merged
-    if (!failures.has(game.appid)) {
-      continue;
-    }
     const last = previous?.progress?.[game.appid];
     if (last) {
       merged.set(game.appid, {
@@ -385,8 +382,23 @@ export async function fetchSteamProfile(
       });
     }
   }
+  for (const game of freshWindow) {
+    const fresh = progressMap.get(game.appid);
+    if (fresh) {
+      merged.set(game.appid, {
+        earned: fresh.filter((p) => p.achieved === 1).length,
+        total: fresh.length,
+        progress: fresh,
+      });
+    }
+  }
 
-  if (candidates.length > 0 && merged.size === 0) {
+  if (merged.size === 0) {
+    if (previous) {
+      // 本轮没拿到任何新数据（Steam 故障或统计不可见），保留旧缓存
+      console.warn("Refresh got no data, keeping previous cache");
+      return;
+    }
     throw new Error(
       "No achievement progress returned, is the Steam profile's game details set to public?",
     );
