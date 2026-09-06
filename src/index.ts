@@ -3,7 +3,6 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { AchievementDetailsGet } from "./endpoints/achievement-details";
 import { SteamProfileGet } from "./endpoints/steam-profile";
-import { setCachedProfile } from "./services/cache";
 import { fetchSteamProfile } from "./services/steam";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -56,12 +55,11 @@ export default {
     ctx.waitUntil(
       (async () => {
         try {
-          const profile = await fetchSteamProfile(
+          await fetchSteamProfile(
             env.STEAM_CACHE,
             env.STEAM_API_KEY,
             env.STEAM_ID64,
           );
-          await setCachedProfile(env.STEAM_CACHE, profile);
         } catch (error) {
           console.error("Scheduled refresh failed", error);
           throw error;

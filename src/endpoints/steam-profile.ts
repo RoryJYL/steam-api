@@ -1,6 +1,6 @@
 import { OpenAPIRoute, Str } from "chanfana";
 import { z } from "zod";
-import { getCachedProfile, setCachedProfile } from "../services/cache";
+import { getCachedProfile } from "../services/cache";
 import { fetchSteamProfile } from "../services/steam";
 import { type AppContext, SteamProfile } from "../types";
 
@@ -48,13 +48,12 @@ export class SteamProfileGet extends OpenAPIRoute {
     }
 
     try {
-      const profile = await fetchSteamProfile(
-        c.env.STEAM_CACHE,
-        apiKey,
-        steamId,
-      );
-      await setCachedProfile(c.env.STEAM_CACHE, profile);
-      return c.json(profile);
+      await fetchSteamProfile(c.env.STEAM_CACHE, apiKey, steamId);
+      const fresh = await getCachedProfile(c.env.STEAM_CACHE);
+      if (fresh) {
+        return c.json(fresh.data);
+      }
+      return c.json({ error: "Failed to fetch Steam profile" }, 502);
     } catch (error) {
       console.error("Failed to fetch Steam profile", error);
       // Return cached data if available

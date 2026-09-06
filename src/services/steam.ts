@@ -1,4 +1,3 @@
-import type { SteamProfileData } from "../types";
 import { sleep } from "../utils/rate-limiter";
 import {
   type AchievementDetails,
@@ -9,6 +8,11 @@ import {
   saveAchievementDetails,
   updatePerfectGamesIndex,
 } from "./achievement-cache";
+import {
+  type GameProgressSnapshot,
+  getCachedProfile,
+  setCachedProfile,
+} from "./cache";
 
 const API_BASE = "https://api.steampowered.com";
 
@@ -100,7 +104,7 @@ async function steamApi<T>(
 
     let response: Response;
     try {
-      response = await fetch(url);
+      response = await fetch(url, { signal: AbortSignal.timeout(15000) });
     } catch (error) {
       // workerd 对网络层失败的 error.message 是空的，必须拼出可读信息
       lastError = `request failed: ${
@@ -152,8 +156,12 @@ async function fetchAchievementProgress(
   apiKey: string,
   steamId: string,
   candidates: SteamOwnedGame[],
-): Promise<Map<number, SteamAchievementProgress[]>> {
+): Promise<{
+  progressMap: Map<number, SteamAchievementProgress[]>;
+  failures: Set<number>;
+}> {
   const progressMap = new Map<number, SteamAchievementProgress[]>();
+  const failures = new Set<number>();
 
   for (let i = 0; i < candidates.length; i++) {
     const game = candidates[i];
@@ -170,6 +178,7 @@ async function fetchAchievementProgress(
       }
     } catch (error) {
       // 单个游戏失败（无成就/私有）不影响整体，跳过
+      failures.add(game.appid);
       console.error(`GetPlayerAchievements failed for ${game.appid}:`, error);
     }
     if (i < candidates.length - 1) {
@@ -178,10 +187,11 @@ async function fetchAchievementProgress(
   }
 
   console.log(
-    `成就进度获取完成: ${progressMap.size}/${candidates.length} 个游戏成功`,
+    `成就进度获取完成: ${progressMap.size}/${candidates.length} 个游戏成功` +
+      (failures.size > 0 ? `, ${failures.size} 个失败(保留旧数据)` : ""),
   );
 
-  return progressMap;
+  return { progressMap, failures };
 }
 
 /**
@@ -198,7 +208,11 @@ async function updateNewPerfectGameDetails(
   index: PerfectGamesIndex,
 ): Promise<void> {
   const existing = new Map(index.games.map((g) => [g.appId, g]));
-  const toFetch = perfectGames.filter(({ game, earned }) => {
+  const toFetch = perfectGames.filter(({ game, earned, progress }) => {
+    if (progress.length === 0) {
+      // 进度来自旧快照（本次抓取失败），没有成就列表可组装详情，跳过
+      return false;
+    }
     const entry = existing.get(game.appid);
     return !entry || entry.earnedAchievements !== earned;
   });
@@ -303,7 +317,9 @@ export async function fetchSteamProfile(
   kv: KVNamespace,
   apiKey: string,
   steamId: string,
-): Promise<SteamProfileData> {
+): Promise<void> {
+  const previous = await getCachedProfile(kv);
+
   const [summaryResponse, gamesResponse] = await Promise.all([
     steamApi<{ response: { players: SteamPlayerSummary[] } }>(
       apiKey,
@@ -334,13 +350,43 @@ export async function fetchSteamProfile(
     (g) => g.has_community_visible_stats && g.playtime_forever > 0,
   );
 
-  const progressMap = await fetchAchievementProgress(
+  const { progressMap, failures } = await fetchAchievementProgress(
     apiKey,
     steamId,
     candidates,
   );
 
-  if (candidates.length > 0 && progressMap.size === 0) {
+  // 本次抓取失败的候选保留上次成功的进度快照，
+  // 保证一次刷新永远不会让缓存比之前更差
+  const merged = new Map<
+    number,
+    { earned: number; total: number; progress: SteamAchievementProgress[] }
+  >();
+  for (const game of candidates) {
+    const fresh = progressMap.get(game.appid);
+    if (fresh) {
+      merged.set(game.appid, {
+        earned: fresh.filter((p) => p.achieved === 1).length,
+        total: fresh.length,
+        progress: fresh,
+      });
+      continue;
+    }
+    // 没抓到且没失败 = 该游戏正常无成就，不进 merged
+    if (!failures.has(game.appid)) {
+      continue;
+    }
+    const last = previous?.progress?.[game.appid];
+    if (last) {
+      merged.set(game.appid, {
+        earned: last.earned,
+        total: last.total,
+        progress: [],
+      });
+    }
+  }
+
+  if (candidates.length > 0 && merged.size === 0) {
     throw new Error(
       "No achievement progress returned, is the Steam profile's game details set to public?",
     );
@@ -348,14 +394,18 @@ export async function fetchSteamProfile(
 
   // 全成就判定：earned == total > 0
   const perfectGames: PerfectGame[] = candidates
-    .map((game) => {
-      const progress = progressMap.get(game.appid) ?? [];
-      return {
-        game,
-        earned: progress.filter((p) => p.achieved === 1).length,
-        total: progress.length,
-        progress,
-      };
+    .flatMap((game) => {
+      const stats = merged.get(game.appid);
+      return stats
+        ? [
+            {
+              game,
+              earned: stats.earned,
+              total: stats.total,
+              progress: stats.progress,
+            },
+          ]
+        : [];
     })
     .filter(({ earned, total }) => earned === total && total > 0)
     .sort((a, b) => b.game.rtime_last_played - a.game.rtime_last_played);
@@ -389,17 +439,26 @@ export async function fetchSteamProfile(
     }),
   );
 
-  const totalAchievements = [...progressMap.values()].reduce(
-    (sum, progress) => sum + progress.filter((p) => p.achieved === 1).length,
+  const totalAchievements = [...merged.values()].reduce(
+    (sum, { earned }) => sum + earned,
     0,
   );
 
-  return {
-    steamId: player.steamid,
-    personaName: player.personaname,
-    avatarUrl: player.avatarfull,
-    profileUrl: player.profileurl,
-    totalAchievements,
-    perfectGames: perfectGamesWithDetails,
-  };
+  const progressSnapshot: Record<string, GameProgressSnapshot> = {};
+  for (const [appId, { earned, total }] of merged) {
+    progressSnapshot[appId] = { earned, total };
+  }
+
+  await setCachedProfile(
+    kv,
+    {
+      steamId: player.steamid,
+      personaName: player.personaname,
+      avatarUrl: player.avatarfull,
+      profileUrl: player.profileurl,
+      totalAchievements,
+      perfectGames: perfectGamesWithDetails,
+    },
+    progressSnapshot,
+  );
 }
