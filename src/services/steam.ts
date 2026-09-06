@@ -89,13 +89,33 @@ async function steamApi<T>(
   params: Record<string, string>,
 ): Promise<T> {
   const search = new URLSearchParams({ key: apiKey, ...params });
-  const response = await fetch(`${API_BASE}${path}?${search.toString()}`);
+  const url = `${API_BASE}${path}?${search.toString()}`;
 
-  if (!response.ok) {
-    throw new Error(`Steam API ${path} failed: ${response.status}`);
+  // Steam API 经常瞬时抽风（连接被重置/429/5xx），统一重试最多 3 次
+  let lastError = "";
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (attempt > 1) {
+      await sleep(1000 * (attempt - 1));
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(url);
+    } catch (error) {
+      // workerd 对网络层失败的 error.message 是空的，必须拼出可读信息
+      lastError = `request failed: ${
+        error instanceof Error && error.message ? error.message : String(error)
+      }`;
+      continue;
+    }
+
+    if (response.ok) {
+      return (await response.json()) as T;
+    }
+    lastError = `HTTP ${response.status}`;
   }
 
-  return (await response.json()) as T;
+  throw new Error(`Steam API ${path} failed: ${lastError}`);
 }
 
 /**
@@ -156,6 +176,10 @@ async function fetchAchievementProgress(
       await sleep(RATE_LIMIT_MS);
     }
   }
+
+  console.log(
+    `成就进度获取完成: ${progressMap.size}/${candidates.length} 个游戏成功`,
+  );
 
   return progressMap;
 }
