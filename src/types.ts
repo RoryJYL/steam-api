@@ -29,3 +29,21 @@ export const SteamProfile = z.object({
 });
 
 export type SteamProfileData = z.infer<typeof SteamProfile>;
+
+export const SteamPresence = z.object({
+  // 只有 personastate === 1 才算在线，忙碌/离开/打盹一概折算成 offline
+  onlineStatus: z.enum(["online", "offline"]),
+  game: z
+    .object({
+      // 非 Steam 快捷方式没有 appId
+      appId: z.number().nullable(),
+      title: z.string(),
+      imageUrl: z.string().nullable(),
+      playtimeMinutes: z.number().nullable(),
+    })
+    .nullable(),
+  lastLogoff: z.string().nullable(),
+  fetchedAt: z.string(),
+});
+
+export type SteamPresenceData = z.infer<typeof SteamPresence>;

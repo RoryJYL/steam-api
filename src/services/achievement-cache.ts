@@ -37,9 +37,10 @@ export interface PerfectGamesIndex {
   lastUpdated: string;
 }
 
-// v3: 图标改用商店页 header_image（带游戏标题），每游戏带 hash 路径
-const ACHIEVEMENT_DETAILS_PREFIX = "steam:achievements:v3:";
-const PERFECT_INDEX_KEY = "steam:perfect_games_index:v3";
+// v5: 缩略图回到 appdetails 的 header_image（460x215，带标题艺术，比例贴合卡片）；
+// v4 的 library_hero 是 3.1:1 超宽场景图，裁进 2.1:1 卡片框后构图全毁
+const ACHIEVEMENT_DETAILS_PREFIX = "steam:achievements:v5:";
+const PERFECT_INDEX_KEY = "steam:perfect_games_index:v5";
 
 /**
  * Get achievement details for a specific game

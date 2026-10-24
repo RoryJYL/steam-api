@@ -13,13 +13,131 @@ import {
   getCachedProfile,
   setCachedProfile,
 } from "./cache";
+import { saveGamesIndex } from "./games-index";
 
 const API_BASE = "https://api.steampowered.com";
 
-// Steam 客户端游戏库横幅图，3840x1240，所有游戏都存在
-// 注意：不能用 header.jpg（460x215 商店图），部分新游戏/小游戏没有该资源会 404
-// （如 Servant of the Lake / appid 3636770），商店页实际用的是带 hash 的路径
 const APP_IMAGE_BASE = "https://cdn.cloudflare.steamstatic.com/steam/apps";
+
+/**
+ * 最后的赌注：社区逆向出来的旧 CDN 直拼路径（1920x620）。
+ *
+ * 不是任何 API 返回的东西，部分新游戏整个目录都没生成（One Way Tickets /
+ * appid 4817620 同目录下 header、capsule 一样全 404）。只在
+ * resolveHeaderImageUrl 也拿不到官方 assets 时才用。
+ */
+export function steamHeaderImageUrl(appId: number): string {
+  return `${APP_IMAGE_BASE}/${appId}/library_hero.jpg`;
+}
+
+/** 头图解析结果缓存 30 天：Steam 换图时 hash 会变，旧 URL 也仍然有效 */
+const HEADER_IMAGE_CACHE_TTL = 30 * 24 * 60 * 60;
+const HEADER_IMAGE_CACHE_PREFIX = "steam:header-image:";
+
+const STORE_BROWSE_URL =
+  "https://api.steampowered.com/IStoreBrowseService/GetItems/v1/";
+const STORE_ASSET_BASE =
+  "https://shared.akamai.steamstatic.com/store_item_assets/";
+
+/**
+ * IStoreBrowseService 是 Steam 官方的商店条目服务（免 key），include_assets
+ * 直接给出各种横幅图的带 hash 完整路径。这是拿大图的唯一正确来源：
+ *
+ * - appdetails 只给 header_image（460x215），放大到卡片上糊得没法看
+ * - 旧 CDN 直拼路径对新游戏直接 404
+ *
+ * 注意 context 不能省：不带 context 时接口不返回 store_items。
+ */
+interface StoreBrowseAssets {
+  asset_url_format?: string;
+  library_hero?: string;
+  library_hero_2x?: string;
+  header_2x?: string;
+  header?: string;
+}
+
+/**
+ * presence 大卡（940 CSS px 宽 @DPR2 需要 1880 物理像素）必须上 2x：
+ * 620 高的图裁成 16:9 只剩 1102px 宽，1x 放大 1.7 倍必糊。
+ *
+ * 这个解析只服务 presence。游戏缩略图走 fetchStoreHeaderImage，
+ * 因为超宽幅的 library_hero 塞进 2.1:1 的卡片框里构图会毁。
+ */
+const HERO_IMAGE_FIELDS = [
+  "library_hero_2x",
+  "library_hero",
+  "header_2x",
+  "header",
+] as const satisfies readonly (keyof StoreBrowseAssets)[];
+
+async function fetchStoreAssets(
+  appId: number,
+): Promise<StoreBrowseAssets | null> {
+  try {
+    const input = {
+      ids: [{ appid: appId }],
+      context: { language: "english", country_code: "US" },
+      data_request: { include_assets: true },
+    };
+    const response = await fetch(
+      `${STORE_BROWSE_URL}?input_json=${encodeURIComponent(JSON.stringify(input))}`,
+    );
+    if (!response.ok) {
+      return null;
+    }
+    const data = (await response.json()) as {
+      response?: { store_items?: { assets?: StoreBrowseAssets }[] };
+    };
+    return data.response?.store_items?.[0]?.assets ?? null;
+  } catch (error) {
+    console.error(`IStoreBrowseService failed for ${appId}:`, error);
+    return null;
+  }
+}
+
+function buildAssetUrl(
+  assets: StoreBrowseAssets,
+  filename: string | undefined,
+): string {
+  if (!filename || !assets.asset_url_format) {
+    return "";
+  }
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: ${FILENAME} 是 Steam 返回的字面量占位符，不是模板
+  return `${STORE_ASSET_BASE}${assets.asset_url_format.replace("${FILENAME}", filename)}`;
+}
+
+/**
+ * 解析 presence 用的游戏头图 URL：走 IStoreBrowseService 的官方 assets。
+ * 旧 CDN 直拼作最后兜底（调用方自己接 steamHeaderImageUrl）。
+ *
+ * 结果写 KV：presence 每 5 分钟刷新一次，不能每次都去问一遍商店服务。
+ * 返回 null 表示确认无图（下架/锁区且旧路径也不存在）。
+ */
+export async function resolveHeaderImageUrl(
+  kv: KVNamespace,
+  appId: number,
+): Promise<string | null> {
+  const cacheKey = `${HEADER_IMAGE_CACHE_PREFIX}${appId}`;
+  const cached = await kv.get(cacheKey);
+  if (typeof cached === "string") {
+    // 空串是「查过、确认没图」的墓碑，不能和未缓存混淆
+    return cached || null;
+  }
+
+  const assets = await fetchStoreAssets(appId);
+  const resolved = assets
+    ? (HERO_IMAGE_FIELDS.map((field) =>
+        buildAssetUrl(assets, assets[field]),
+      ).find((url) => url) ?? "")
+    : "";
+
+  await kv.put(cacheKey, resolved, {
+    expirationTtl: HEADER_IMAGE_CACHE_TTL,
+  });
+
+  return resolved || null;
+}
+
 // 成就图标统一用社区 assets 路径（新旧游戏均有效）
 // 注意：schema 返回的 icon 可能是纯 hash，也可能是带旧版路径的完整 URL
 // （旧路径 steamcommunity/public/images/apps 对部分新游戏是死链，
@@ -92,7 +210,7 @@ interface PerfectGame {
   progress: SteamAchievementProgress[];
 }
 
-async function steamApi<T>(
+export async function steamApi<T>(
   apiKey: string,
   path: string,
   params: Record<string, string>,
@@ -128,7 +246,11 @@ async function steamApi<T>(
 }
 
 /**
- * 从商店 API 获取 header_image（带游戏标题艺术）。
+ * 从商店 API 获取 header_image（460x215，带游戏标题艺术）。
+ *
+ * 缩略图必须用这个，不能用 library_hero：后者是 3.1:1 的超宽场景图，
+ * 塞进卡片 2.1:1 的框里两侧被裁掉，构图全毁、也看不出是哪个游戏。
+ * header_image 本来就是商店横版封面，比例贴合且带标题。
  * 无商店页（下架/锁区）时返回空串，调用方回退到 hero 图。
  */
 async function fetchStoreHeaderImage(appId: number): Promise<string> {
@@ -350,6 +472,26 @@ export async function fetchSteamProfile(
 
   const games = gamesResponse.response.games ?? [];
 
+  // presence 端点只拿得到 appid，靠这份索引补游戏名和总时长（已玩的才有意义）
+  // 拿不到游戏库时不写：宁可留着旧索引，也不要把它清空
+  if (games.length > 0) {
+    await saveGamesIndex(
+      kv,
+      Object.fromEntries(
+        games
+          .filter(
+            (game) =>
+              game.name &&
+              (game.playtime_forever > 0 || game.rtime_last_played > 0),
+          )
+          .map((game) => [
+            String(game.appid),
+            { name: game.name, playtimeMinutes: game.playtime_forever },
+          ]),
+      ),
+    );
+  }
+
   // 有可见统计（成就）且玩过的游戏才是候选
   const candidates = games.filter(
     (g) => g.has_community_visible_stats && g.playtime_forever > 0,
@@ -434,7 +576,8 @@ export async function fetchSteamProfile(
         name: game.name,
         iconUrl:
           details?.headerImageUrl ||
-          `${APP_IMAGE_BASE}/${game.appid}/library_hero.jpg`,
+          (await resolveHeaderImageUrl(kv, game.appid)) ||
+          steamHeaderImageUrl(game.appid),
         playtimeMinutes: game.playtime_forever,
         lastPlayed: game.rtime_last_played
           ? new Date(game.rtime_last_played * 1000).toISOString()
